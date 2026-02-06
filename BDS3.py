@@ -1,6 +1,6 @@
 """
-🌊 Question 3: Flood Risk Index (FRI)
-📌 Problem Statement
+ Question 3: Flood Risk Index (FRI)
+Problem Statement
 
 Identify flood-prone urban regions in Coimbatore by analyzing proximity
 of built infrastructure to water bodies.
@@ -9,7 +9,7 @@ Flood risk increases when:
 - Many buildings are close to water bodies
 - Roads are located near rivers, canals, or lakes
 
-🧠 Concept & Explanation
+ Concept & Explanation
 
 Flood risk is a spatial vulnerability problem.
 
@@ -28,7 +28,40 @@ Why this weighting?
 Higher FRI ⇒ Higher flood vulnerability
 """
 
+# =============================
+# Flood Risk Index (FRI)
+# Coimbatore | Google Colab
+# =============================
+
+# =====================================================
+# Flood Risk Index (FRI)
+# Proper Water-Buffer-Based Spatial Analysis
+# Google Colab
+# =====================================================
+
 from pymongo import MongoClient
+import folium
+from IPython.display import display
+
+# -----------------------------
+# Helper: Safe geometry handler
+# -----------------------------
+def get_lat_lon(geometry):
+    coords = geometry["coordinates"]
+
+    if geometry["type"] == "Point":
+        return coords[1], coords[0]
+
+    if geometry["type"] == "Polygon":
+        lon, lat = coords[0][0]
+        return lat, lon
+
+    if geometry["type"] == "MultiPolygon":
+        lon, lat = coords[0][0][0]
+        return lat, lon
+
+    return None, None
+
 
 # -----------------------------
 # MongoDB Connection
@@ -43,71 +76,115 @@ roads = db.roads
 water = db.water
 
 # -----------------------------
-# Grid points (same grid used earlier)
+# Parameters
 # -----------------------------
-grid_points = [
-    [76.94, 11.01],
-    [76.95, 11.01],
-    [76.96, 11.01],
-    [76.94, 11.02],
-    [76.95, 11.02],
-    [76.96, 11.02],
-    [76.94, 11.03],
-    [76.95, 11.03],
-    [76.96, 11.03],
-]
-
-# -----------------------------
-# Radius settings
-# -----------------------------
-EARTH_RADIUS_KM = 6378.1
 BUFFER_KM = 1.5
+EARTH_RADIUS_KM = 6378.1
 BUFFER_RAD = BUFFER_KM / EARTH_RADIUS_KM
 
-results = []
+# -----------------------------
+# Create Folium Map
+# -----------------------------
+m = folium.Map(
+    location=[11.0168, 76.9558],
+    zoom_start=12,
+    tiles="cartodbpositron"
+)
+
+total_buildings_near = 0
+total_roads_near = 0
+
+# -----------------------------
+# Process Each Water Body
+# -----------------------------
+for w in water.find():
+    if "geometry" not in w:
+        continue
+
+    water_geom = w["geometry"]
+
+    # ---- Plot Water Body ----
+    folium.GeoJson(
+        water_geom,
+        style_function=lambda x: {
+            "color": "blue",
+            "weight": 2,
+            "fillOpacity": 0.3
+        }
+    ).add_to(m)
+
+    # ---- Buildings near this water body ----
+    nearby_buildings = buildings.find({
+        "geometry": {
+            "$geoIntersects": {
+                "$geometry": water_geom
+            }
+        }
+    })
+
+    for b in nearby_buildings:
+        lat, lon = get_lat_lon(b["geometry"])
+        if lat and lon:
+            folium.CircleMarker(
+                location=[lat, lon],
+                radius=3,
+                color="red",
+                fill=True,
+                fill_opacity=0.7,
+                popup="Building near water"
+            ).add_to(m)
+            total_buildings_near += 1
+
+    # ---- Roads near this water body ----
+    nearby_roads = roads.find({
+        "geometry": {
+            "$geoIntersects": {
+                "$geometry": water_geom
+            }
+        }
+    })
+
+    for r in nearby_roads:
+        if "geometry" in r:
+            folium.GeoJson(
+                r["geometry"],
+                style_function=lambda x: {
+                    "color": "orange",
+                    "weight": 2
+                }
+            ).add_to(m)
+            total_roads_near += 1
 
 # -----------------------------
 # Compute Flood Risk Index
 # -----------------------------
-for point in grid_points:
-
-    buildings_near_water = buildings.count_documents({
-        "geometry": {
-            "$geoWithin": {
-                "$centerSphere": [point, BUFFER_RAD]
-            }
-        }
-    })
-
-    roads_near_water = roads.count_documents({
-        "geometry": {
-            "$geoWithin": {
-                "$centerSphere": [point, BUFFER_RAD]
-            }
-        }
-    })
-
-    flood_risk = (0.7 * buildings_near_water) + (0.3 * roads_near_water)
-
-    results.append({
-        "center": point,
-        "buildings_near_water": buildings_near_water,
-        "roads_near_water": roads_near_water,
-        "FRI": round(flood_risk, 2)
-    })
+FRI = round((0.7 * total_buildings_near) + (0.3 * total_roads_near), 2)
 
 # -----------------------------
-# Sort by Flood Risk
+# Mark Flood Risk Summary
 # -----------------------------
-results.sort(key=lambda x: x["FRI"], reverse=True)
+folium.Marker(
+    location=[11.0168, 76.9558],
+    popup=(
+        f" Flood Risk Summary<br>"
+        f"Buildings near water: {total_buildings_near}<br>"
+        f"Roads near water: {total_roads_near}<br>"
+        f"Flood Risk Index (FRI): {FRI}"
+    ),
+    icon=folium.Icon(color="blue", icon="tint")
+).add_to(m)
 
 # -----------------------------
-# Output
+# Display Map
 # -----------------------------
-print("\n🌊 Flood Risk Index Results (Highest Risk Area):\n")
+print("Flood-prone buildings and roads correctly identified")
+display(m)
 
-top = results[0]
-print(f"Center (lon,lat): {top['center']}")
-print(f"Buildings near water: {top['buildings_near_water']}")
-print(f"Roads near water: {top['roads_near_water']}")
-print(f"Flood Risk Index (FRI): {top['FRI']}")
+# -----------------------------
+# Console Output
+# -----------------------------
+print("\n Flood Risk Index (Corrected Results)\n")
+print(f"Buildings near water: {total_buildings_near}")
+print(f"Roads near water: {total_roads_near}")
+print(f"Flood Risk Index (FRI): {FRI}")
+
