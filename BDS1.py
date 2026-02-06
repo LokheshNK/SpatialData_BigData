@@ -1,7 +1,7 @@
 """
-🏙️ Question 1: Urban Density Index (UDI)
+ Question 1: Urban Density Index (UDI)
 
-📌 Problem Statement
+ Problem Statement
 Identify the most densely developed urban region in Coimbatore using spatial data.
 
 We compute an Urban Density Index (UDI) by combining:
@@ -9,7 +9,7 @@ We compute an Urban Density Index (UDI) by combining:
 - Number of points of interest (POIs)
 - Number of road segments
 
-🧠 Concept & Explanation
+ Concept & Explanation
 Urban density reflects how intensively land is used.
 
 - More buildings → higher built-up density
@@ -148,18 +148,18 @@ top = results[0]
 
 folium.Marker(
     location=[top["center"][1], top["center"][0]],
-    popup=f"🏙️ Highest UDI Area<br>UDI: {top['UDI']}",
+    popup=f" Highest UDI Area<br>UDI: {top['UDI']}",
     icon=folium.Icon(color="red", icon="info-sign")
 ).add_to(coimbatore_map)
 
 # -----------------------------
 # Display Map (Colab)
 # -----------------------------
-print("✅ Urban Density Index computed successfully")
+print("Urban Density Index computed successfully")
 display(coimbatore_map)
 
 top = results[0]
-print("\n🏙️ Urban Density Index Results (Top Region):\n")
+print("\n Urban Density Index Results (Top Region):\n")
 print(f"Center (lon,lat): {top['center']}")
 print(f"Buildings: {top['buildings']}")
 print(f"POIs: {top['pois']}")
