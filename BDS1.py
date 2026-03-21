@@ -13,7 +13,120 @@ We compute an Urban Density Index (UDI) by combining:
 Urban density reflects how intensively land is used.
 
 - More buildings → higher built-up density
-- More POIs → higher human activity
+- More POIs → hig"""
+Question 1: Urban Density Index (UDI)
+
+Spatial Query Types Used:
+  - $geoWithin + $centerSphere  (range query)
+  - Multi-collection spatial count
+
+Visualization: Choropleth grid (color-scaled rectangles), not circles
+
+Formula:
+  UDI = (0.5 × Buildings) + (0.3 × POIs) + (0.2 × Roads)
+"""
+
+from pymongo import MongoClient
+import folium
+import numpy as np
+from IPython.display import display
+
+client = MongoClient("mongodb+srv://loki:NKVL1183@cluster0.mmcwtwu.mongodb.net/")
+db = client["bigdata_spatial"]
+buildings = db.buildings
+roads     = db.roads
+pois      = db.pois_area
+
+GRID_RADIUS_KM  = 2
+EARTH_RADIUS_KM = 6378.1
+GRID_RADIUS_RAD = GRID_RADIUS_KM / EARTH_RADIUS_KM
+
+# Grid step in degrees (~2.2 km)
+STEP = 0.02
+min_lon, max_lon = 76.87, 77.03
+min_lat, max_lat = 10.96, 11.09
+
+grid_points = [
+    [lon, lat]
+    for lon in np.arange(min_lon, max_lon, STEP)
+    for lat in np.arange(min_lat, max_lat, STEP)
+]
+
+results = []
+for point in grid_points:
+    b = buildings.count_documents({"geometry": {"$geoWithin": {"$centerSphere": [point, GRID_RADIUS_RAD]}}})
+    p = pois.count_documents(     {"geometry": {"$geoWithin": {"$centerSphere": [point, GRID_RADIUS_RAD]}}})
+    r = roads.count_documents(    {"geometry": {"$geoWithin": {"$centerSphere": [point, GRID_RADIUS_RAD]}}})
+    udi = round(0.5*b + 0.3*p + 0.2*r, 2)
+    results.append({"center": point, "buildings": b, "pois": p, "roads": r, "UDI": udi})
+
+results.sort(key=lambda x: x["UDI"], reverse=True)
+max_udi = max(r["UDI"] for r in results) or 1
+
+# ── Folium: Choropleth rectangles ─────────────────────────────────────────────
+m = folium.Map(location=[11.0168, 76.9558], zoom_start=12, tiles="cartodbpositron")
+
+half = STEP / 2  # half-cell for bounding box
+
+def udi_color(norm):
+    """Return hex color from white→yellow→orange→red based on 0‒1 intensity."""
+    if norm < 0.33:
+        r2, g2, b2 = 255, int(255 - norm*3*200), 100
+    elif norm < 0.66:
+        t = (norm - 0.33) / 0.33
+        r2, g2, b2 = 255, int(55 - t*55), int(100 - t*100)
+    else:
+        t = (norm - 0.66) / 0.34
+        r2, g2, b2 = int(255 - t*55), 0, 0
+    return "#{:02X}{:02X}{:02X}".format(r2, g2, b2)
+
+for rec in results:
+    lon, lat = rec["center"]
+    norm     = rec["UDI"] / max_udi
+    color    = udi_color(norm)
+    bounds   = [[lat - half, lon - half], [lat + half, lon + half]]
+    folium.Rectangle(
+        bounds=bounds,
+        fill=True,
+        fill_color=color,
+        fill_opacity=0.55,
+        color=color,
+        weight=0,
+        popup=(
+            f"<b>UDI: {rec['UDI']}</b><br>"
+            f"Buildings: {rec['buildings']}<br>"
+            f"POIs: {rec['pois']}<br>"
+            f"Roads: {rec['roads']}"
+        )
+    ).add_to(m)
+
+# Top-UDI marker
+top = results[0]
+folium.Marker(
+    location=[top["center"][1], top["center"][0]],
+    popup=f"<b>Highest UDI: {top['UDI']}</b>",
+    icon=folium.Icon(color="red", icon="star")
+).add_to(m)
+
+# Legend (HTML in corner)
+legend_html = """
+<div style="position:fixed;bottom:30px;left:30px;z-index:1000;background:white;
+     padding:10px 14px;border-radius:8px;border:1px solid #ccc;font-size:12px;">
+  <b>Urban Density Index</b><br>
+  <span style="background:#FF6464;padding:2px 8px;">&nbsp;</span> High<br>
+  <span style="background:#FF8700;padding:2px 8px;">&nbsp;</span> Medium<br>
+  <span style="background:#FFCA64;padding:2px 8px;">&nbsp;</span> Low
+</div>"""
+m.get_root().html.add_child(folium.Element(legend_html))
+
+print("Urban Density Index (choropleth grid) computed successfully")
+display(m)
+
+top = results[0]
+print(f"\nHighest UDI Zone:")
+print(f"  Center (lon,lat): {top['center']}")
+print(f"  Buildings: {top['buildings']} | POIs: {top['pois']} | Roads: {top['roads']}")
+print(f"  UDI: {top['UDI']}")her human activity
 - More roads → better connectivity
 
 To balance these factors, we define:
