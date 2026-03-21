@@ -1,111 +1,122 @@
 """
-🚑 Question 4: Emergency Service Coverage Index (ESCI)
-📌 Problem Statement
+Question 4: Traffic Congestion Risk Score (TCRS)
 
-Evaluate how well different regions of Coimbatore are covered
-by emergency services such as hospitals, clinics, and major roads.
+Spatial Query Types Used:
+  - $geoWithin + $centerSphere  (range query)
+  - Demand/capacity ratio model
 
-A region is considered well-covered if:
-- Hospitals are nearby (fast medical response)
-- Roads are dense (quick accessibility)
-
-🧠 Concept & Explanation
-
-Emergency response efficiency depends on:
-- Availability of healthcare facilities
-- Accessibility via road networks
-
-We define an Emergency Service Coverage Index (ESCI):
-
-ESCI = (0.6 × Hospitals) + (0.4 × Road_Segments)
-
-Why these weights?
-- Hospitals are the primary factor → higher weight
-- Roads support access → secondary but important
-
-Higher ESCI ⇒ Better emergency preparedness
+Visualization: Choropleth rectangles (demand/capacity = white→yellow→red)
+               + PolyLine overlay tracing the main road network
 """
 
 from pymongo import MongoClient
+import folium
+import numpy as np
+from IPython.display import display
 
-# -----------------------------
-# MongoDB Connection
-# -----------------------------
-client = MongoClient(
-    "mongodb+srv://loki:NKVL1183@cluster0.mmcwtwu.mongodb.net/"
-)
-db = client["bigdata_spatial"]
+client    = MongoClient("mongodb+srv://loki:NKVL1183@cluster0.mmcwtwu.mongodb.net/")
+db        = client["bigdata_spatial"]
+buildings = db.buildings
+roads     = db.roads
+pois      = db.pois_area
 
-pois = db.pois_area
-roads = db.roads
+GRID_RADIUS_KM  = 2
+EARTH_RADIUS_KM = 6378.1
+GRID_RADIUS_RAD = GRID_RADIUS_KM / EARTH_RADIUS_KM
 
-# -----------------------------
-# Grid points (same as earlier)
-# -----------------------------
+STEP = 0.02
+min_lon, max_lon = 76.87, 77.03
+min_lat, max_lat = 10.96, 11.09
+
 grid_points = [
-    [76.94, 11.01],
-    [76.95, 11.01],
-    [76.96, 11.01],
-    [76.94, 11.02],
-    [76.95, 11.02],
-    [76.96, 11.02],
-    [76.94, 11.03],
-    [76.95, 11.03],
-    [76.96, 11.03],
+    [lon, lat]
+    for lon in np.arange(min_lon, max_lon, STEP)
+    for lat in np.arange(min_lat, max_lat, STEP)
 ]
 
-# -----------------------------
-# Radius parameters
-# -----------------------------
-EARTH_RADIUS_KM = 6378.1
-SEARCH_RADIUS_KM = 3
-SEARCH_RADIUS_RAD = SEARCH_RADIUS_KM / EARTH_RADIUS_KM
-
 results = []
-
-# -----------------------------
-# Compute ESCI
-# -----------------------------
 for point in grid_points:
+    b = buildings.count_documents({"geometry": {"$geoWithin": {"$centerSphere": [point, GRID_RADIUS_RAD]}}})
+    p = pois.count_documents(     {"geometry": {"$geoWithin": {"$centerSphere": [point, GRID_RADIUS_RAD]}}})
+    r = roads.count_documents(    {"geometry": {"$geoWithin": {"$centerSphere": [point, GRID_RADIUS_RAD]}}})
+    tcrs = round((0.4*b + 0.4*p) / (1 + 0.2*r), 2)
+    results.append({"center": point, "buildings": b, "pois": p, "roads": r, "TCRS": tcrs})
 
-    hospital_count = pois.count_documents({
-        "properties.fclass": "hospital",
-        "geometry": {
-            "$geoWithin": {
-                "$centerSphere": [point, SEARCH_RADIUS_RAD]
-            }
-        }
-    })
+results.sort(key=lambda x: x["TCRS"], reverse=True)
+max_tcrs = max(r["TCRS"] for r in results) or 1
 
-    road_count = roads.count_documents({
-        "geometry": {
-            "$geoWithin": {
-                "$centerSphere": [point, SEARCH_RADIUS_RAD]
-            }
-        }
-    })
+def congestion_color(norm):
+    """white → yellow → orange → red"""
+    r_val = 255
+    if norm < 0.5:
+        g_val = 255
+        b_val = int(255 * (1 - norm * 2))
+    else:
+        g_val = int(255 * (1 - (norm - 0.5) * 2))
+        b_val = 0
+    return "#{:02X}{:02X}{:02X}".format(r_val, g_val, b_val)
 
-    esci = (0.6 * hospital_count) + (0.4 * road_count)
+m = folium.Map(location=[11.0168, 76.9558], zoom_start=12, tiles="cartodbdark_matter")
 
-    results.append({
-        "center": point,
-        "hospitals": hospital_count,
-        "roads": road_count,
-        "ESCI": round(esci, 2)
-    })
+half = STEP / 2
+for rec in results:
+    lon, lat = rec["center"]
+    norm     = rec["TCRS"] / max_tcrs
+    color    = congestion_color(norm)
+    bounds   = [[lat - half, lon - half], [lat + half, lon + half]]
+    folium.Rectangle(
+        bounds=bounds,
+        fill=True,
+        fill_color=color,
+        fill_opacity=0.6,
+        color=color,
+        weight=0,
+        popup=(
+            f"<b>Congestion Risk: {rec['TCRS']}</b><br>"
+            f"Buildings: {rec['buildings']}<br>"
+            f"POIs: {rec['pois']}<br>"
+            f"Roads: {rec['roads']}"
+        )
+    ).add_to(m)
 
-# -----------------------------
-# Sort by Emergency Coverage
-# -----------------------------
-results.sort(key=lambda x: x["ESCI"], reverse=True)
+# Overlay a sample of road segments as thin white lines for context
+road_docs = roads.find(
+    {"geometry.type": "LineString"},
+    {"geometry.coordinates": 1, "_id": 0}
+).limit(300)
 
-# -----------------------------
-# Output
-# -----------------------------
-print("\n🚑 Emergency Service Coverage Index (Top Area):\n")
+road_layer = folium.FeatureGroup(name="Road Network (sample)", show=True)
+for doc in road_docs:
+    try:
+        coords = doc["geometry"]["coordinates"]
+        latlngs = [[c[1], c[0]] for c in coords if len(c) >= 2]
+        if len(latlngs) >= 2:
+            folium.PolyLine(latlngs, color="white", weight=0.6, opacity=0.35).add_to(road_layer)
+    except (KeyError, TypeError):
+        continue
+road_layer.add_to(m)
 
+folium.LayerControl().add_to(m)
+
+# Hotspot label for worst congestion
 top = results[0]
-print(f"Center (lon,lat): {top['center']}")
-print(f"Hospitals: {top['hospitals']}")
-print(f"Road segments: {top['roads']}")
-print(f"Emergency Service Coverage Index (ESCI): {top['ESCI']}")
+folium.Marker(
+    location=[top["center"][1], top["center"][0]],
+    popup=f"<b>Worst Congestion Zone</b><br>TCRS: {top['TCRS']}",
+    icon=folium.Icon(color="red", icon="exclamation-sign")
+).add_to(m)
+
+legend_html = """
+<div style="position:fixed;bottom:30px;left:30px;z-index:1000;background:#1a1a2e;color:white;
+     padding:10px 14px;border-radius:8px;border:1px solid #555;font-size:12px;">
+  <b>Traffic Congestion Risk</b><br>
+  <span style="color:#FF0000">■</span> High risk<br>
+  <span style="color:#FFA500">■</span> Medium risk<br>
+  <span style="color:#FFFF00">■</span> Low risk
+</div>"""
+m.get_root().html.add_child(folium.Element(legend_html))
+
+print("Traffic Congestion Risk Score computed successfully")
+display(m)
+
+print(f"\nHighest Congestion Zone: {top['center']} — TCRS: {top['TCRS']}")
