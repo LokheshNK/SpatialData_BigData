@@ -1,190 +1,118 @@
 """
- Question 3: Flood Risk Index (FRI)
-Problem Statement
+Question 3: Commercial Hotspot Score (CHS)
 
-Identify flood-prone urban regions in Coimbatore by analyzing proximity
-of built infrastructure to water bodies.
+Spatial Query Types Used:
+  - $geoWithin + $centerSphere  (range query)
+  - amenity field filter on POI collection
 
-Flood risk increases when:
-- Many buildings are close to water bodies
-- Roads are located near rivers, canals, or lakes
-
- Concept & Explanation
-
-Flood risk is a spatial vulnerability problem.
-
-Key assumptions:
-- Buildings near water → higher property damage risk
-- Roads near water → transport disruption risk
-
-We compute a Flood Risk Index (FRI) using:
-
-FRI = (0.7 × Buildings_near_water) + (0.3 × Roads_near_water)
-
-Why this weighting?
-- Buildings suffer permanent damage → higher weight
-- Roads are repairable → lower weight
-
-Higher FRI ⇒ Higher flood vulnerability
+Visualization: folium.plugins.FastMarkerCluster — clusters commercial POIs
+               so you can visually see where activity is densest
+               + DivIcon custom markers for top hotspot zones
 """
 
-# =============================
-# Flood Risk Index (FRI)
-# Coimbatore | Google Colab
-# =============================
-
-# =====================================================
-# Flood Risk Index (FRI)
-# Proper Water-Buffer-Based Spatial Analysis
-# Google Colab
-# =====================================================
-
 from pymongo import MongoClient
+from folium.plugins import FastMarkerCluster
 import folium
+import numpy as np
 from IPython.display import display
 
-# -----------------------------
-# Helper: Safe geometry handler
-# -----------------------------
-def get_lat_lon(geometry):
-    coords = geometry["coordinates"]
-
-    if geometry["type"] == "Point":
-        return coords[1], coords[0]
-
-    if geometry["type"] == "Polygon":
-        lon, lat = coords[0][0]
-        return lat, lon
-
-    if geometry["type"] == "MultiPolygon":
-        lon, lat = coords[0][0][0]
-        return lat, lon
-
-    return None, None
-
-
-# -----------------------------
-# MongoDB Connection
-# -----------------------------
-client = MongoClient(
-    "mongodb+srv://loki:NKVL1183@cluster0.mmcwtwu.mongodb.net/"
-)
-db = client["bigdata_spatial"]
-
+client    = MongoClient("mongodb+srv://loki:NKVL1183@cluster0.mmcwtwu.mongodb.net/")
+db        = client["bigdata_spatial"]
 buildings = db.buildings
-roads = db.roads
-water = db.water
+roads     = db.roads
+pois      = db.pois_area
 
-# -----------------------------
-# Parameters
-# -----------------------------
-BUFFER_KM = 1.5
+GRID_RADIUS_KM  = 2
 EARTH_RADIUS_KM = 6378.1
-BUFFER_RAD = BUFFER_KM / EARTH_RADIUS_KM
+GRID_RADIUS_RAD = GRID_RADIUS_KM / EARTH_RADIUS_KM
 
-# -----------------------------
-# Create Folium Map
-# -----------------------------
-m = folium.Map(
-    location=[11.0168, 76.9558],
-    zoom_start=12,
-    tiles="cartodbpositron"
+STEP = 0.025
+min_lon, max_lon = 76.87, 77.03
+min_lat, max_lat = 10.96, 11.09
+
+grid_points = [
+    [lon, lat]
+    for lon in np.arange(min_lon, max_lon, STEP)
+    for lat in np.arange(min_lat, max_lat, STEP)
+]
+
+COMMERCIAL_AMENITIES = [
+    "restaurant", "cafe", "bank", "atm", "marketplace",
+    "shop", "supermarket", "pharmacy", "fast_food", "bar"
+]
+
+results = []
+for point in grid_points:
+    comm = pois.count_documents({
+        "geometry": {"$geoWithin": {"$centerSphere": [point, GRID_RADIUS_RAD]}},
+        "properties.amenity": {"$in": COMMERCIAL_AMENITIES}
+    })
+    r = roads.count_documents(    {"geometry": {"$geoWithin": {"$centerSphere": [point, GRID_RADIUS_RAD]}}})
+    b = buildings.count_documents({"geometry": {"$geoWithin": {"$centerSphere": [point, GRID_RADIUS_RAD]}}})
+    chs = round(0.5*comm + 0.3*r + 0.2*b, 2)
+    results.append({"center": point, "commercial": comm, "roads": r, "buildings": b, "CHS": chs})
+
+results.sort(key=lambda x: x["CHS"], reverse=True)
+
+# ── Folium: Fetch individual commercial POI points for cluster layer ──────────
+m = folium.Map(location=[11.0168, 76.9558], zoom_start=12, tiles="cartodbpositron")
+
+# Pull actual commercial POI coordinates from MongoDB for the cluster view
+commercial_docs = pois.find(
+    {"properties.amenity": {"$in": COMMERCIAL_AMENITIES}},
+    {"geometry.coordinates": 1, "properties.amenity": 1, "_id": 0}
 )
 
-total_buildings_near = 0
-total_roads_near = 0
-
-# -----------------------------
-# Process Each Water Body
-# -----------------------------
-for w in water.find():
-    if "geometry" not in w:
+poi_points = []
+for doc in commercial_docs:
+    try:
+        coords = doc["geometry"]["coordinates"]
+        # Point geometry: [lon, lat]
+        if isinstance(coords[0], (int, float)):
+            poi_points.append([coords[1], coords[0]])
+        # Polygon centroid: take first ring first point as rough centroid
+        elif isinstance(coords[0], list):
+            ring = coords[0]
+            avg_lat = sum(p[1] for p in ring) / len(ring)
+            avg_lon = sum(p[0] for p in ring) / len(ring)
+            poi_points.append([avg_lat, avg_lon])
+    except (KeyError, IndexError, TypeError):
         continue
 
-    water_geom = w["geometry"]
+if poi_points:
+    FastMarkerCluster(poi_points).add_to(m)
 
-    # ---- Plot Water Body ----
-    folium.GeoJson(
-        water_geom,
-        style_function=lambda x: {
-            "color": "blue",
-            "weight": 2,
-            "fillOpacity": 0.3
-        }
+# Top commercial hotspot zones as custom styled markers
+for i, rec in enumerate(results[:5]):
+    lat, lon = rec["center"][1], rec["center"][0]
+    label = f"#{i+1}"
+    icon_html = f"""
+    <div style="background:#FF7700;color:white;font-weight:bold;
+                border-radius:50%;width:28px;height:28px;
+                display:flex;align-items:center;justify-content:center;
+                font-size:12px;border:2px solid white;box-shadow:0 2px 4px rgba(0,0,0,0.3);">
+      {label}
+    </div>"""
+    folium.Marker(
+        location=[lat, lon],
+        popup=f"<b>Commercial Hotspot {label}</b><br>CHS: {rec['CHS']}<br>Commercial POIs: {rec['commercial']}",
+        icon=folium.DivIcon(html=icon_html, icon_size=(28, 28), icon_anchor=(14, 14))
     ).add_to(m)
 
-    # ---- Buildings near this water body ----
-    nearby_buildings = buildings.find({
-        "geometry": {
-            "$geoIntersects": {
-                "$geometry": water_geom
-            }
-        }
-    })
+legend_html = """
+<div style="position:fixed;bottom:30px;left:30px;z-index:1000;background:white;
+     padding:10px 14px;border-radius:8px;border:1px solid #ccc;font-size:12px;">
+  <b>Commercial Hotspot Score</b><br>
+  Clusters = actual commercial POIs<br>
+  <span style="color:#FF7700;font-weight:bold">● #1–#5</span> = top hotspot zones
+</div>"""
+m.get_root().html.add_child(folium.Element(legend_html))
 
-    for b in nearby_buildings:
-        lat, lon = get_lat_lon(b["geometry"])
-        if lat and lon:
-            folium.CircleMarker(
-                location=[lat, lon],
-                radius=3,
-                color="red",
-                fill=True,
-                fill_opacity=0.7,
-                popup="Building near water"
-            ).add_to(m)
-            total_buildings_near += 1
-
-    # ---- Roads near this water body ----
-    nearby_roads = roads.find({
-        "geometry": {
-            "$geoIntersects": {
-                "$geometry": water_geom
-            }
-        }
-    })
-
-    for r in nearby_roads:
-        if "geometry" in r:
-            folium.GeoJson(
-                r["geometry"],
-                style_function=lambda x: {
-                    "color": "orange",
-                    "weight": 2
-                }
-            ).add_to(m)
-            total_roads_near += 1
-
-# -----------------------------
-# Compute Flood Risk Index
-# -----------------------------
-FRI = round((0.7 * total_buildings_near) + (0.3 * total_roads_near), 2)
-
-# -----------------------------
-# Mark Flood Risk Summary
-# -----------------------------
-folium.Marker(
-    location=[11.0168, 76.9558],
-    popup=(
-        f" Flood Risk Summary<br>"
-        f"Buildings near water: {total_buildings_near}<br>"
-        f"Roads near water: {total_roads_near}<br>"
-        f"Flood Risk Index (FRI): {FRI}"
-    ),
-    icon=folium.Icon(color="blue", icon="tint")
-).add_to(m)
-
-# -----------------------------
-# Display Map
-# -----------------------------
-print("Flood-prone buildings and roads correctly identified")
+print("Commercial Hotspot Score (MarkerCluster) computed successfully")
 display(m)
 
-# -----------------------------
-# Console Output
-# -----------------------------
-print("\n Flood Risk Index (Corrected Results)\n")
-print(f"Buildings near water: {total_buildings_near}")
-print(f"Roads near water: {total_roads_near}")
-print(f"Flood Risk Index (FRI): {FRI}")
-
+print(f"\nTop Commercial Hotspot Zone:")
+top = results[0]
+print(f"  Center: {top['center']} | CHS: {top['CHS']}")
+print(f"  Commercial POIs: {top['commercial']} | Roads: {top['roads']}")
+print(f"\nTotal commercial POI points on map: {len(poi_points)}")
